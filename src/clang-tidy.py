@@ -1,15 +1,5 @@
-#!/usr/bin/env python
 """
 A driver script to run clang-tidy on changes detected via git.
-
-By default, clang-tidy runs on all files you point it at. This means that even
-if you changed only parts of that file, you will get warnings for the whole
-file. This script has the ability to ask git for the exact lines that have
-changed since a particular git revision, and makes clang-tidy only lint those.
-This makes it much less overhead to integrate in CI and much more relevant to
-developers. This git-enabled mode is optional, and full scans of a directory
-tree are also possible. In both cases, the script allows filtering files via
-glob or regular expressions.
 """
 
 from __future__ import print_function
@@ -26,12 +16,14 @@ import subprocess
 import sys
 import tempfile
 from pipes import quote
+from typing import Any, Generator
+from typing import Dict
+from typing import List
+
 
 Patterns = collections.namedtuple("Patterns", "positive, negative")
 
-# NOTE: Clang-tidy cannot lint headers directly, because headers are not
-# compiled -- translation units are, of which there is one per implementation
-# (c/cc/cpp) file.
+# NOTE: Clang-tidy cannot lint headers directly
 DEFAULT_FILE_PATTERN = re.compile(r".*\.c(c|pp)?")
 
 # @@ -start,count +start,count @@
@@ -41,22 +33,22 @@ CHUNK_PATTERN = r"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@"
 VERBOSE = False
 
 
-def run_shell_command(arguments):
+def run_shell_command(arguments: List[str]) -> str:
     """Executes a shell command."""
     if VERBOSE:
         print(" ".join(arguments))
     try:
         output = subprocess.check_output(arguments).decode().strip()
-    except subprocess.CalledProcessError:
-        _, error, _ = sys.exc_info()
-        error_output = error.output.decode().strip()
-        raise RuntimeError("Error executing {}: {}".format(" ".join(arguments), error_output))
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            "Error executing {}: {}".format(" ".join(arguments), e)
+        )
 
     return output
 
 
-def split_negative_from_positive_patterns(patterns):
-    """Separates negative patterns (that start with a dash) from positive patterns"""
+def split_negative_from_positive_patterns(patterns: Any) -> Patterns:
+    """Separates negative patterns from positive patterns"""
     positive, negative = [], []
     for pattern in patterns:
         if pattern.startswith("-"):
@@ -67,13 +59,17 @@ def split_negative_from_positive_patterns(patterns):
     return Patterns(positive, negative)
 
 
-def get_file_patterns(globs, regexes):
-    """Returns a list of compiled regex objects from globs and regex pattern strings."""
+def get_file_patterns(globs: Any, regexes: Any) -> Patterns:
+    """Returns a list of compiled regex objects from globs and regex pattern."""
     glob = split_negative_from_positive_patterns(globs)
     regexes = split_negative_from_positive_patterns(regexes)
 
-    positive_regexes = regexes.positive + [fnmatch.translate(g) for g in glob.positive]
-    negative_regexes = regexes.negative + [fnmatch.translate(g) for g in glob.negative]
+    positive_regexes = regexes.positive + [
+        fnmatch.translate(g) for g in glob.positive
+    ]
+    negative_regexes = regexes.negative + [
+        fnmatch.translate(g) for g in glob.negative
+    ]
 
     positive_patterns = [re.compile(regex) for regex in positive_regexes] or [
         DEFAULT_FILE_PATTERN
@@ -83,7 +79,7 @@ def get_file_patterns(globs, regexes):
     return Patterns(positive_patterns, negative_patterns)
 
 
-def filter_files(files, file_patterns):
+def filter_files(files: List[str], file_patterns: Any) -> Generator:
     """Returns all files that match any of the patterns."""
     if VERBOSE:
         print("Filtering with these file patterns: {}".format(file_patterns))
@@ -96,22 +92,23 @@ def filter_files(files, file_patterns):
             print("{} omitted due to file filters".format(file))
 
 
-def get_changed_files(revision, paths):
+def get_changed_files(revision: Any, paths: List[str]) -> List[str]:
     """Runs git diff to get the paths of all changed files."""
-    # --diff-filter AMU gets us files that are (A)dded, (M)odified or (U)nmerged (in the working copy).
-    # --name-only makes git diff return only the file paths, without any of the source changes.
+    # --diff-filter AMU gets us files that are:
+    # # (A)dded, (M)odified or (U)nmerged (in the working copy).
+    # --name-only makes git diff return only the file paths
     command = "git diff-index --diff-filter=AMU --ignore-all-space --name-only"
     output = run_shell_command(shlex.split(command) + [revision] + paths)
     return output.split("\n")
 
 
-def get_all_files(paths):
+def get_all_files(paths: List[str]) -> List[str]:
     """Returns all files that are tracked by git in the given paths."""
     output = run_shell_command(["git", "ls-files"] + paths)
     return output.split("\n")
 
 
-def get_changed_lines(revision, filename):
+def get_changed_lines(revision: Any, filename: str) -> Any:
     """Runs git diff to get the line ranges of all file changes."""
     command = shlex.split("git diff-index --unified=0") + [revision, filename]
     output = run_shell_command(command)
@@ -125,6 +122,7 @@ def get_changed_lines(revision, filename):
         changed_lines.append([start, start + count])
 
     return {"name": filename, "lines": changed_lines}
+
 
 ninja_template = """
 rule do_cmd
@@ -141,12 +139,16 @@ build {i}: do_cmd
 """
 
 
-def run_shell_commands_in_parallel(commands):
-    """runs all the commands in parallel with ninja, commands is a List[List[str]]"""
-    build_entries = [build_template.format(i=i, cmd=' '.join([quote(s) for s in command]))
-                     for i, command in enumerate(commands)]
+def run_shell_commands_in_parallel(commands: List[List[Any]]) -> str:
+    """runs all the commands in parallel with ninja"""
+    build_entries = [
+        build_template.format(i=i, cmd=' '.join([quote(s) for s in command]))
+        for i, command in enumerate(commands)
+    ]
 
-    file_contents = ninja_template.format(build_rules='\n'.join(build_entries)).encode()
+    file_contents = ninja_template.format(
+        build_rules='\n'.join(build_entries)
+    ).encode()
     f = tempfile.NamedTemporaryFile(delete=False)
     try:
         f.write(file_contents)
@@ -156,7 +158,11 @@ def run_shell_commands_in_parallel(commands):
         os.unlink(f.name)
 
 
-def run_clang_tidy(options, line_filters, files):
+def run_clang_tidy(
+    options: argparse.Namespace,
+    line_filters: List[Dict[str, Any]],
+    files: List[str],
+) -> str:
     """Executes the actual clang-tidy command in the shell."""
     command = [options.clang_tidy_exe, "-p", options.compile_commands_dir]
     if not options.config_file and os.path.exists(".clang-tidy"):
@@ -166,7 +172,10 @@ def run_clang_tidy(options, line_filters, files):
 
         with open(options.config_file) as config:
             # Here we convert the YAML config file to a JSON blob.
-            command += ["-config", json.dumps(yaml.load(config, Loader=yaml.FullLoader))]
+            command += [
+                "-config",
+                json.dumps(yaml.load(config, Loader=yaml.FullLoader)),
+            ]
     command += options.extra_args
 
     if line_filters:
@@ -178,7 +187,9 @@ def run_clang_tidy(options, line_filters, files):
     else:
         command += files
         if options.dry_run:
-            command = [re.sub(r"^([{[].*[]}])$", r"'\1'", arg) for arg in command]
+            command = [
+                re.sub(r"^([{[].*[]}])$", r"'\1'", arg) for arg in command
+            ]
             return " ".join(command)
 
         output = run_shell_command(command)
@@ -190,9 +201,11 @@ def run_clang_tidy(options, line_filters, files):
     return output
 
 
-def parse_options():
+def parse_options() -> argparse.Namespace:
     """Parses the command line options."""
-    parser = argparse.ArgumentParser(description="Run Clang-Tidy (on your Git changes)")
+    parser = argparse.ArgumentParser(
+        description="Run Clang-Tidy (on your Git changes)"
+    )
     parser.add_argument(
         "-e",
         "--clang-tidy-exe",
@@ -213,7 +226,7 @@ def parse_options():
         "--regex",
         action="append",
         default=[],
-        help="Only lint files that match these regular expressions (from the start of the filename). "
+        help="Only lint files that match these regular expressions. "
         "If a pattern starts with a - the search is negated for that pattern.",
     )
     parser.add_argument(
@@ -238,7 +251,9 @@ def parse_options():
         action="store_true",
         help="Only show the command to be executed, without running it",
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Verbose output"
+    )
     parser.add_argument(
         "--config-file",
         help="Path to a clang-tidy config file. Defaults to '.clang-tidy'.",
@@ -253,7 +268,7 @@ def parse_options():
         "-j",
         "--parallel",
         action="store_true",
-        help="Run clang tidy in parallel per-file (requires ninja to be installed).",
+        help="Run clang tidy in parallel per-file (requires ninja).",
     )
     parser.add_argument(
         "extra_args", nargs="*", help="Extra arguments to forward to clang-tidy"

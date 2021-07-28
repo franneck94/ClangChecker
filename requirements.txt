@@ -1,0 +1,5 @@
+mypy
+flake8
+autopep8
+black
+types-PyYAML
