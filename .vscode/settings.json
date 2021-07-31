@@ -1,0 +1,12 @@
+{
+  "python.pythonPath": "~\\anaconda3\\python.exe",
+  "python.formatting.blackArgs": [
+    "-S",
+    "-C",
+    "-l 80"
+  ],
+  "python.formatting.provider": "black",
+  "[python]": {
+    "editor.formatOnSave": true
+  }
+}

@@ -1,0 +1,35 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run Format",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "${workspaceFolder}/src/clang-format.py",
+                "--paths=\"C:/Users/Jan/Documents/_LocalCoding/ClangChecker/test\""
+            ],
+            "group": "build",
+            "presentation": {
+                "reveal": "silent"
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Run Tidy",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "${workspaceFolder}/src/clang-tidy.py",
+                "--paths=\"C:/Users/Jan/Documents/_LocalCoding/ClangChecker/test\""
+            ],
+            "group": "build",
+            "presentation": {
+                "reveal": "silent"
+            },
+            "problemMatcher": "$gcc"
+        }
+    ]
+}
