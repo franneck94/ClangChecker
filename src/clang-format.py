@@ -6,28 +6,23 @@ import argparse
 import asyncio
 import os
 import re
+import subprocess
 import sys
-from typing import Sequence
+from typing import List, Sequence
 from typing import Set
 
 
-CLANG_FORMAT_PATH = os.path.join("clang-format")
+CLANG_FORMAT_EXE = "clang-format"
 
-# Whitelist of directories to check. All files that in that directory
-# (recursively) will be checked.
-CLANG_FORMAT_WHITELIST = ["test/"]
-
-# Only files with names matching this regex will be formatted.
 CPP_FILE_REGEX = re.compile(".*\\.(h|hh|hpp|hxx|c|cc|cpp|cxx)$")
 
 
-def get_whitelisted_files() -> Set[str]:
+def get_whitelisted_files(paths: List[str]) -> Set[str]:
     """
-    Parse CLANG_FORMAT_WHITELIST and resolve all directories.
-    Returns the set of whitelist cpp source files.
+    Resolve all directories. Returns the set of whitelist cpp source files.
     """
     matches = []
-    for dir in CLANG_FORMAT_WHITELIST:
+    for dir in paths:
         for root, _, filenames in os.walk(dir):
             for filename in filenames:
                 if CPP_FILE_REGEX.match(filename):
@@ -42,7 +37,7 @@ async def run_clang_format_on_file(
     Run clang-format on the provided file.
     """
     # -style=file picks up the closest .clang-format, -i formats inplace.
-    cmd = "{} -style=file -i {}".format(CLANG_FORMAT_PATH, filename)
+    cmd = "{} -style=file -i {}".format(CLANG_FORMAT_EXE, filename)
     async with semaphore:
         proc = await asyncio.create_subprocess_shell(cmd)
         _ = await proc.wait()
@@ -58,7 +53,7 @@ async def file_clang_formatted_correctly(
     """
     ok = True
     # -style=file picks up the closest .clang-format
-    cmd = "{} -style=file {}".format(CLANG_FORMAT_PATH, filename)
+    cmd = "{} -style=file {}".format(CLANG_FORMAT_EXE, filename)
 
     async with semaphore:
         proc = await asyncio.create_subprocess_shell(
@@ -80,18 +75,24 @@ async def file_clang_formatted_correctly(
 
 
 async def run_clang_format(
-    max_processes: int, diff: bool = False, verbose: bool = False
+    paths: List[str],
+    max_processes: int,
+    diff: bool = False,
+    verbose: bool = False,
 ) -> bool:
     """
     Run clang-format to all files.
     """
     # Check to make sure the clang-format binary exists.
-    if not os.path.exists(CLANG_FORMAT_PATH):
+    return_code = subprocess.run(
+        f'{CLANG_FORMAT_EXE} --help', stdout=subprocess.DEVNULL
+    )
+    if not return_code:
         print("clang-format binary not found")
         return False
 
     # Gather command-line options for clang-format.
-    args = [CLANG_FORMAT_PATH, "-style=file"]
+    args = [CLANG_FORMAT_EXE, "-style=file"]
 
     if not diff:
         args.append("-i")
@@ -106,7 +107,7 @@ async def run_clang_format(
         for f in asyncio.as_completed(
             [
                 file_clang_formatted_correctly(f, semaphore, verbose)
-                for f in get_whitelisted_files()
+                for f in get_whitelisted_files(paths)
             ]
         ):
             ok &= await f
@@ -119,7 +120,7 @@ async def run_clang_format(
         await asyncio.gather(
             *[
                 run_clang_format_on_file(f, semaphore, verbose)
-                for f in get_whitelisted_files()
+                for f in get_whitelisted_files(paths)
             ]
         )
     return ok
@@ -135,17 +136,29 @@ def parse_args(args: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "-d",
         "--diff",
-        action="store_true",
         default=False,
         help="Determine whether running clang-format would produce changes",
     )
-    parser.add_argument("--verbose", "-v", action="store_true", default=False)
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        default=False,
+        help="Determine whether running clang-format would produce stdout",
+    )
     parser.add_argument(
         "--max-processes",
         type=int,
-        default=50,
+        default=4,
         help="Maximum number of subprocesses to format files in parallel",
     )
+    parser.add_argument(
+        "-p",
+        "--paths",
+        nargs="+",
+        default=["."],
+        help="Format only the given paths (recursively)",
+    )
+
     return parser.parse_args(args)
 
 
@@ -154,7 +167,9 @@ def main(args: Sequence[str]) -> int:
     options = parse_args(args)
     # Invoke clang-format on all files in the directories in the whitelist.
     ok = asyncio.run(
-        run_clang_format(options.max_processes, options.diff, options.verbose)
+        run_clang_format(
+            options.paths, options.max_processes, options.diff, options.verbose
+        )
     )
     # We have to invert because False -> 0, which is the code to be returned
     return not ok

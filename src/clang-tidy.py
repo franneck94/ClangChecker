@@ -1,242 +1,140 @@
 """
-A driver script to run clang-tidy on changes detected via git.
+A script that runs clang-tidy on all C/C++ files.
 """
-
-from __future__ import print_function
 
 import argparse
-import collections
-import fnmatch
-import json
+import asyncio
 import os
-import os.path
 import re
-import shlex
 import subprocess
 import sys
-import tempfile
-from pipes import quote
-from typing import Any, Generator
-from typing import Dict
-from typing import List
+from typing import List, Sequence
+from typing import Set
 
 
-Patterns = collections.namedtuple("Patterns", "positive, negative")
+CLANG_TIDY_EXE = "clang-tidy"
 
-# NOTE: Clang-tidy cannot lint headers directly
-DEFAULT_FILE_PATTERN = re.compile(r".*\.c(c|pp)?")
-
-# @@ -start,count +start,count @@
-CHUNK_PATTERN = r"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@"
-
-# Set from command line arguments in main().
-VERBOSE = False
+CPP_FILE_REGEX = re.compile(".*\\.(h|hh|hpp|hxx|c|cc|cpp|cxx)$")
 
 
-def run_shell_command(arguments: List[str]) -> str:
-    """Executes a shell command."""
-    if VERBOSE:
-        print(" ".join(arguments))
-    try:
-        output = subprocess.check_output(arguments).decode().strip()
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            "Error executing {}: {}".format(" ".join(arguments), e)
+def get_whitelisted_files(paths: List[str]) -> Set[str]:
+    """
+    Resolve all directories. Returns the set of whitelist cpp source files.
+    """
+    matches = []
+    for dir in paths:
+        for root, _, filenames in os.walk(dir):
+            for filename in filenames:
+                if CPP_FILE_REGEX.match(filename):
+                    matches.append(
+                        os.path.join(os.path.abspath(root), filename)
+                    )
+    return set(matches)
+
+
+async def run_clang_tidy_on_file(
+    filename: str, semaphore: asyncio.Semaphore, verbose: bool = False
+) -> None:
+    """
+    Run clang-tidy on the provided file.
+    """
+    cmd = "{} {}".format(CLANG_TIDY_EXE, filename)
+    async with semaphore:
+        proc = await asyncio.create_subprocess_shell(cmd)
+        _ = await proc.wait()
+    if verbose:
+        print("Linted {}".format(filename))
+
+
+async def file_clang_tidyted_correctly(
+    filename: str, semaphore: asyncio.Semaphore, verbose: bool = False
+) -> bool:
+    """
+    Checks if a file is formatted correctly and returns True if so.
+    """
+    ok = True
+    cmd = "{} {}".format(CLANG_TIDY_EXE, filename)
+
+    async with semaphore:
+        proc = await asyncio.create_subprocess_shell(
+            cmd, stdout=asyncio.subprocess.PIPE
         )
+        # Read back the formatted file.
+        _, _ = await proc.communicate()
 
-    return output
+    return ok
 
 
-def split_negative_from_positive_patterns(patterns: Any) -> Patterns:
-    """Separates negative patterns from positive patterns"""
-    positive, negative = [], []
-    for pattern in patterns:
-        if pattern.startswith("-"):
-            negative.append(pattern[1:])
+async def run_clang_tidy(
+    paths: List[str],
+    max_processes: int,
+    diff: bool = False,
+    verbose: bool = False,
+) -> bool:
+    """
+    Run clang-tidy to all files.
+    """
+    # Check to make sure the clang-tidy binary exists.
+    return_code = subprocess.run(
+        f'{CLANG_TIDY_EXE} --help', stdout=subprocess.DEVNULL
+    )
+    if not return_code:
+        print("clang-tidy binary not found")
+        return False
+
+    ok = True
+
+    # Semaphore to bound the number of subprocesses that can be created at once
+    semaphore = asyncio.Semaphore(max_processes)
+
+    # Format files in parallel.
+    if diff:
+        for f in asyncio.as_completed(
+            [
+                file_clang_tidyted_correctly(f, semaphore, verbose)
+                for f in get_whitelisted_files(paths)
+            ]
+        ):
+            ok &= await f
+
+        if ok:
+            print("All files formatted correctly")
         else:
-            positive.append(pattern)
-
-    return Patterns(positive, negative)
-
-
-def get_file_patterns(globs: Any, regexes: Any) -> Patterns:
-    """Returns a list of compiled regex objects from globs and regex pattern."""
-    glob = split_negative_from_positive_patterns(globs)
-    regexes = split_negative_from_positive_patterns(regexes)
-
-    positive_regexes = regexes.positive + [
-        fnmatch.translate(g) for g in glob.positive
-    ]
-    negative_regexes = regexes.negative + [
-        fnmatch.translate(g) for g in glob.negative
-    ]
-
-    positive_patterns = [re.compile(regex) for regex in positive_regexes] or [
-        DEFAULT_FILE_PATTERN
-    ]
-    negative_patterns = [re.compile(regex) for regex in negative_regexes]
-
-    return Patterns(positive_patterns, negative_patterns)
-
-
-def filter_files(files: List[str], file_patterns: Any) -> Generator:
-    """Returns all files that match any of the patterns."""
-    if VERBOSE:
-        print("Filtering with these file patterns: {}".format(file_patterns))
-    for file in files:
-        if not any(n.match(file) for n in file_patterns.negative):
-            if any(p.match(file) for p in file_patterns.positive):
-                yield file
-                continue
-        if VERBOSE:
-            print("{} omitted due to file filters".format(file))
-
-
-def get_changed_files(revision: Any, paths: List[str]) -> List[str]:
-    """Runs git diff to get the paths of all changed files."""
-    # --diff-filter AMU gets us files that are:
-    # # (A)dded, (M)odified or (U)nmerged (in the working copy).
-    # --name-only makes git diff return only the file paths
-    command = "git diff-index --diff-filter=AMU --ignore-all-space --name-only"
-    output = run_shell_command(shlex.split(command) + [revision] + paths)
-    return output.split("\n")
-
-
-def get_all_files(paths: List[str]) -> List[str]:
-    """Returns all files that are tracked by git in the given paths."""
-    output = run_shell_command(["git", "ls-files"] + paths)
-    return output.split("\n")
-
-
-def get_changed_lines(revision: Any, filename: str) -> Any:
-    """Runs git diff to get the line ranges of all file changes."""
-    command = shlex.split("git diff-index --unified=0") + [revision, filename]
-    output = run_shell_command(command)
-    changed_lines = []
-    for chunk in re.finditer(CHUNK_PATTERN, output, re.MULTILINE):
-        start = int(chunk.group(1))
-        count = int(chunk.group(2) or 1)
-        # If count == 0, a chunk was removed and can be ignored.
-        if count == 0:
-            continue
-        changed_lines.append([start, start + count])
-
-    return {"name": filename, "lines": changed_lines}
-
-
-ninja_template = """
-rule do_cmd
-  command = $cmd
-  description = Running clang-tidy
-
-{build_rules}
-"""
-
-
-build_template = """
-build {i}: do_cmd
-  cmd = {cmd}
-"""
-
-
-def run_shell_commands_in_parallel(commands: List[List[Any]]) -> str:
-    """runs all the commands in parallel with ninja"""
-    build_entries = [
-        build_template.format(i=i, cmd=' '.join([quote(s) for s in command]))
-        for i, command in enumerate(commands)
-    ]
-
-    file_contents = ninja_template.format(
-        build_rules='\n'.join(build_entries)
-    ).encode()
-    f = tempfile.NamedTemporaryFile(delete=False)
-    try:
-        f.write(file_contents)
-        f.close()
-        return run_shell_command(['ninja', '-f', f.name])
-    finally:
-        os.unlink(f.name)
-
-
-def run_clang_tidy(
-    options: argparse.Namespace,
-    line_filters: List[Dict[str, Any]],
-    files: List[str],
-) -> str:
-    """Executes the actual clang-tidy command in the shell."""
-    command = [options.clang_tidy_exe, "-p", options.compile_commands_dir]
-    if not options.config_file and os.path.exists(".clang-tidy"):
-        options.config_file = ".clang-tidy"
-    if options.config_file:
-        import yaml
-
-        with open(options.config_file) as config:
-            # Here we convert the YAML config file to a JSON blob.
-            command += [
-                "-config",
-                json.dumps(yaml.load(config, Loader=yaml.FullLoader)),
-            ]
-    command += options.extra_args
-
-    if line_filters:
-        command += ["-line-filter", json.dumps(line_filters)]
-
-    if options.parallel:
-        commands = [list(command) + [f] for f in files]
-        output = run_shell_commands_in_parallel(commands)
+            print("Some files not formatted correctly")
     else:
-        command += files
-        if options.dry_run:
-            command = [
-                re.sub(r"^([{[].*[]}])$", r"'\1'", arg) for arg in command
+        await asyncio.gather(
+            *[
+                run_clang_tidy_on_file(f, semaphore, verbose)
+                for f in get_whitelisted_files(paths)
             ]
-            return " ".join(command)
-
-        output = run_shell_command(command)
-
-    if not options.keep_going and "[clang-diagnostic-error]" in output:
-        message = "Found clang-diagnostic-errors in clang-tidy output: {}"
-        raise RuntimeError(message.format(output))
-
-    return output
+        )
+    return ok
 
 
-def parse_options() -> argparse.Namespace:
-    """Parses the command line options."""
+def parse_args(args: Sequence[str]) -> argparse.Namespace:
+    """
+    Parse and return command-line arguments.
+    """
     parser = argparse.ArgumentParser(
-        description="Run Clang-Tidy (on your Git changes)"
+        description="Execute clang-tidy on your working copy changes."
     )
     parser.add_argument(
-        "-e",
-        "--clang-tidy-exe",
-        default="clang-tidy",
-        help="Path to clang-tidy executable",
+        "-d",
+        "--diff",
+        default=False,
+        help="Determine whether running clang-tidy would produce changes",
     )
     parser.add_argument(
-        "-g",
-        "--glob",
-        action="append",
-        default=[],
-        help="Only lint files that match these glob patterns "
-        "(see documentation for `fnmatch` for supported syntax)."
-        "If a pattern starts with a - the search is negated for that pattern.",
+        "--verbose",
+        "-v",
+        default=False,
+        help="Determine whether running clang-tidy would produce stdout",
     )
     parser.add_argument(
-        "-x",
-        "--regex",
-        action="append",
-        default=[],
-        help="Only lint files that match these regular expressions. "
-        "If a pattern starts with a - the search is negated for that pattern.",
-    )
-    parser.add_argument(
-        "-c",
-        "--compile-commands-dir",
-        default="build",
-        help="Path to the folder containing compile_commands.json",
-    )
-    parser.add_argument(
-        "-d", "--diff", help="Git revision to diff against to get changes"
+        "--max-processes",
+        type=int,
+        default=4,
+        help="Maximum number of subprocesses to lint files in parallel",
     )
     parser.add_argument(
         "-p",
@@ -245,70 +143,22 @@ def parse_options() -> argparse.Namespace:
         default=["."],
         help="Lint only the given paths (recursively)",
     )
-    parser.add_argument(
-        "-n",
-        "--dry-run",
-        action="store_true",
-        help="Only show the command to be executed, without running it",
+
+    return parser.parse_args(args)
+
+
+def main(args: Sequence[str]) -> int:
+    # Parse arguments.
+    options = parse_args(args)
+    # Invoke clang-tidy on all files in the directories in the whitelist.
+    ok = asyncio.run(
+        run_clang_tidy(
+            options.paths, options.max_processes, options.diff, options.verbose
+        )
     )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Verbose output"
-    )
-    parser.add_argument(
-        "--config-file",
-        help="Path to a clang-tidy config file. Defaults to '.clang-tidy'.",
-    )
-    parser.add_argument(
-        "-k",
-        "--keep-going",
-        action="store_true",
-        help="Don't error on compiler errors (clang-diagnostic-error)",
-    )
-    parser.add_argument(
-        "-j",
-        "--parallel",
-        action="store_true",
-        help="Run clang tidy in parallel per-file (requires ninja).",
-    )
-    parser.add_argument(
-        "extra_args", nargs="*", help="Extra arguments to forward to clang-tidy"
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    options = parse_options()
-
-    # This flag is pervasive enough to set it globally. It makes the code
-    # cleaner compared to threading it through every single function.
-    global VERBOSE
-    VERBOSE = options.verbose
-
-    # Normalize the paths first.
-    paths = [path.rstrip("/") for path in options.paths]
-    if options.diff:
-        files = get_changed_files(options.diff, paths)
-    else:
-        files = get_all_files(paths)
-    file_patterns = get_file_patterns(options.glob, options.regex)
-    files = list(filter_files(files, file_patterns))
-
-    # clang-tidy error's when it does not get input files.
-    if not files:
-        print("No files detected.")
-        sys.exit()
-
-    line_filters = []
-    if options.diff:
-        line_filters = [get_changed_lines(options.diff, f) for f in files]
-
-    pwd = os.getcwd() + "/"
-    clang_tidy_output = run_clang_tidy(options, line_filters, files)
-
-    for line in clang_tidy_output.splitlines():
-        if line.startswith(pwd):
-            print(line[len(pwd):])
+    # We have to invert because False -> 0, which is the code to be returned
+    return not ok
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))
