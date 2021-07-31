@@ -36,13 +36,12 @@ async def run_clang_format_on_file(
     """
     Run clang-format on the provided file.
     """
-    # -style=file picks up the closest .clang-format, -i formats inplace.
-    cmd = "{} -style=file -i {}".format(CLANG_FORMAT_EXE, filename)
+    cmd = f"{CLANG_FORMAT_EXE} -style=file -i {filename}"
     async with semaphore:
         proc = await asyncio.create_subprocess_shell(cmd)
         _ = await proc.wait()
     if verbose:
-        print("Formatted {}".format(filename))
+        print(f"Formatted {filename}")
 
 
 async def file_clang_formatted_correctly(
@@ -53,7 +52,7 @@ async def file_clang_formatted_correctly(
     """
     ok = True
     # -style=file picks up the closest .clang-format
-    cmd = "{} -style=file {}".format(CLANG_FORMAT_EXE, filename)
+    cmd = f"{CLANG_FORMAT_EXE} -style=file {filename}"
 
     async with semaphore:
         proc = await asyncio.create_subprocess_shell(
@@ -69,7 +68,7 @@ async def file_clang_formatted_correctly(
         if formatted_contents != orig_contents:
             ok = False
             if verbose:
-                print("{} is not formatted correctly".format(filename))
+                print(f"{filename} is not formatted correctly")
 
     return ok
 

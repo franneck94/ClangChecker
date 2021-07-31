@@ -38,12 +38,12 @@ async def run_clang_tidy_on_file(
     """
     Run clang-tidy on the provided file.
     """
-    cmd = "{} {}".format(CLANG_TIDY_EXE, filename)
+    cmd = f"{CLANG_TIDY_EXE} {filename}"
     async with semaphore:
         proc = await asyncio.create_subprocess_shell(cmd)
         _ = await proc.wait()
     if verbose:
-        print("Linted {}".format(filename))
+        print(f"Linted {filename}")
 
 
 async def file_clang_tidyted_correctly(
@@ -53,7 +53,7 @@ async def file_clang_tidyted_correctly(
     Checks if a file is formatted correctly and returns True if so.
     """
     ok = True
-    cmd = "{} {}".format(CLANG_TIDY_EXE, filename)
+    cmd = f"{CLANG_TIDY_EXE} {filename}"
 
     async with semaphore:
         proc = await asyncio.create_subprocess_shell(
